@@ -133,7 +133,7 @@ object Embedding {
       redisClient.close()
     }
 
-    embeddingLSH(sparkSession, model.getVectors)
+    embeddingLSH(sparkSession, model.getVectors,saveToRedis,redisKeyPrefix)
     model
   }
 
@@ -227,12 +227,14 @@ object Embedding {
     (transitionMatrix, itemDistribution)
   }
 
-  def embeddingLSH(spark:SparkSession, movieEmbMap:Map[String, Array[Float]]): Unit ={
+  def embeddingLSH(spark:SparkSession, movieEmbMap:Map[String, Array[Float]], saveToRedis:Boolean, redisKeyPrefix:String): Unit ={
+    import spark.implicits._
 
     val movieEmbSeq = movieEmbMap.toSeq.map(item => (item._1, Vectors.dense(item._2.map(f => f.toDouble))))
     val movieEmbDF = spark.createDataFrame(movieEmbSeq).toDF("movieId", "emb")
 
     //LSH bucket model
+    //其中最关键的部分是设定 LSH 模型中的 BucketLength 和 NumHashTables 这两个参数。其中，BucketLength 指的就是分桶公式中的分桶宽度 w，NumHashTables 指的是多桶策略中的分桶次数。
     val bucketProjectionLSH = new BucketedRandomProjectionLSH()
       .setBucketLength(0.1)
       .setNumHashTables(3)
@@ -245,6 +247,25 @@ object Embedding {
     embBucketResult.printSchema()
     println("movieId, emb, bucketId data result:")
     embBucketResult.show(10, truncate = false)
+    if (saveToRedis) {
+
+//      for (movieId <- model.getVectors.keys) {
+//        redisClient.set(redisKeyPrefix + ":" + movieId, model.getVectors(movieId).mkString(" "), params)
+//      }
+      val redisClient = new Jedis(redisEndpoint, redisPort)
+      val params = SetParams.setParams()
+      params.ex(60 * 60 * 24)
+      val pipe = redisClient.pipelined
+      embBucketResult.collect.foreach(row => {
+            val movieId = row.getAs[String]("movieId")
+            val emb = row.getAs[List[Double]]("emb")
+            val bucketIdList = row.getAs[List[String]]("bucketId")
+            pipe.set(redisKeyPrefix + "LSH:" + movieId, bucketIdList.mkString(" "), params)
+      })
+      pipe.sync()
+      redisClient.close()
+
+    }
 
     println("Approximately searching for 5 nearest neighbors of the sample embedding:")
     val sampleEmb = Vectors.dense(0.795,0.583,1.120,0.850,0.174,-0.839,-0.0633,0.249,0.673,-0.237)
@@ -279,7 +300,7 @@ object Embedding {
     val embLength = 10
 
     val samples = processItemSequence(spark, rawSampleDataPath)
-    val model = trainItem2vec(spark, samples, embLength, "item2vecEmb.csv", saveToRedis = false, "i2vEmb")
+    val model = trainItem2vec(spark, samples, embLength, "item2vecEmb.csv", saveToRedis = true, "i2vEmb")
     //graphEmb(samples, spark, embLength, "itemGraphEmb.csv", saveToRedis = true, "graphEmb")
     //generateUserEmb(spark, rawSampleDataPath, model, embLength, "userEmb.csv", saveToRedis = false, "uEmb")
   }
