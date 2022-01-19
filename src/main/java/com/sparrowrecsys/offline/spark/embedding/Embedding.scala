@@ -1,11 +1,10 @@
 package com.sparrowrecsys.offline.spark.embedding
 
 import java.io.{BufferedWriter, File, FileWriter}
-
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.SparkConf
 import org.apache.spark.ml.feature.BucketedRandomProjectionLSH
-import org.apache.spark.ml.linalg.Vectors
+import org.apache.spark.ml.linalg.{DenseVector, Vectors}
 import org.apache.spark.mllib.feature.{Word2Vec, Word2VecModel}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.expressions.UserDefinedFunction
@@ -122,16 +121,16 @@ object Embedding {
     }
     bw.close()
 
-    if (saveToRedis) {
-      val redisClient = new Jedis(redisEndpoint, redisPort)
-      val params = SetParams.setParams()
-      //set ttl to 24hs
-      params.ex(60 * 60 * 24)
-      for (movieId <- model.getVectors.keys) {
-        redisClient.set(redisKeyPrefix + ":" + movieId, model.getVectors(movieId).mkString(" "), params)
-      }
-      redisClient.close()
-    }
+//    if (saveToRedis) {
+//      val redisClient = new Jedis(redisEndpoint, redisPort)
+//      val params = SetParams.setParams()
+//      //set ttl to 24hs
+//      params.ex(60 * 60 * 24)
+//      for (movieId <- model.getVectors.keys) {
+//        redisClient.set(redisKeyPrefix + ":" + movieId, model.getVectors(movieId).mkString(" "), params)
+//      }
+//      redisClient.close()
+//    }
 
     embeddingLSH(sparkSession, model.getVectors,saveToRedis,redisKeyPrefix)
     model
@@ -256,12 +255,25 @@ object Embedding {
       val params = SetParams.setParams()
       params.ex(60 * 60 * 24)
       val pipe = redisClient.pipelined
+      // key: bucketId value: item list
+      var bucketIdRevertedIndex:Map[Double,Array[String]] = Map()
       embBucketResult.collect.foreach(row => {
             val movieId = row.getAs[String]("movieId")
-            val emb = row.getAs[List[Double]]("emb")
-            val bucketIdList = row.getAs[List[String]]("bucketId")
-            pipe.set(redisKeyPrefix + "LSH:" + movieId, bucketIdList.mkString(" "), params)
+            val bucketIdList = row.getAs[Seq[DenseVector]]("bucketId")
+//            pipe.set(redisKeyPrefix + "LSH:" + movieId, bucketIdList.mkString(" "), params)
+            bucketIdList.foreach(bucketIdSource => {
+              println(bucketIdSource.values.mkString(","))
+              val bucketId = bucketIdSource.values(0)
+              if (bucketIdRevertedIndex.contains(bucketId)){
+                bucketIdRevertedIndex(bucketId) :+ movieId
+              } else bucketIdRevertedIndex += (bucketId -> Array(movieId))
+            })
       })
+      bucketIdRevertedIndex.foreach( entry => {
+        val bucketId = entry._1
+        val movieIdList = entry._2
+//        pipe.set(redisKeyPrefix + "RevertedIndex:" + bucketId, movieIdList.mkString(" "), params)
+      } )
       pipe.sync()
       redisClient.close()
 
@@ -304,4 +316,12 @@ object Embedding {
     //graphEmb(samples, spark, embLength, "itemGraphEmb.csv", saveToRedis = true, "graphEmb")
     //generateUserEmb(spark, rawSampleDataPath, model, embLength, "userEmb.csv", saveToRedis = false, "uEmb")
   }
+
+//  def main(args: Array[String]): Unit = {
+//    var bucketIdRevertedIndex:Map[Double,Array[String]] = Map()
+//    if (bucketIdRevertedIndex.contains(-1.0)){
+//      bucketIdRevertedIndex(-1.0) :+ "movieId"
+//    } else bucketIdRevertedIndex += (-1.0 -> Array("movieId"))
+//    println(bucketIdRevertedIndex.mkString(","))
+//  }
 }
